@@ -1,0 +1,198 @@
+import os
+import sqlite3
+from datetime import datetime
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, ContextTypes, filters
+)
+
+TOKEN = os.environ.get("BOT_TOKEN")
+DB_NAME = "razval_history.db"
+
+MODELS = [
+    "Cobalt", "Nexia 3", "Gentra", "Lacetti", "Damas", "Spark", "Matiz",
+    "Malibu", "Tracker", "Onix", "Equinox", "Captiva", "Tahoe", "Labo",
+    "Kia", "Hyundai", "Toyota", "Бошқа модель"
+]
+
+def db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cars (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL,
+            plate TEXT NOT NULL,
+            mileage TEXT NOT NULL,
+            car_photo TEXT,
+            work_photo TEXT,
+            master TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
+
+def keyboard(items, columns=2):
+    rows = [items[i:i + columns] for i in range(0, len(items), columns)]
+    rows.append(["❌ Бекор қилиш"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text(
+        "🚘 Dehqonobod 3D Razval журналига хуш келибсиз.\n\n"
+        "Янги автомобиль киритиш учун «➕ Янги автомобиль» ни босинг.\n"
+        "Аввалги маълумотни топиш учун «🔎 Рақам бўйича қидириш» ни босинг.",
+        reply_markup=keyboard(["➕ Янги автомобиль", "🔎 Рақам бўйича қидириш"], 1)
+    )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Бекор қилинди. /start ни босиб қайта бошланг.",
+                                    reply_markup=ReplyKeyboardRemove())
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "❌ Бекор қилиш":
+        return await cancel(update, context)
+
+    step = context.user_data.get("step")
+
+    if text == "➕ Янги автомобиль":
+        context.user_data.clear()
+        context.user_data["step"] = "model"
+        return await update.message.reply_text(
+            "Автомобиль моделини танланг:",
+            reply_markup=keyboard(MODELS, 2)
+        )
+
+    if text == "🔎 Рақам бўйича қидириш":
+        context.user_data.clear()
+        context.user_data["step"] = "search"
+        return await update.message.reply_text(
+            "Автомобиль давлат рақамини киритинг:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+    if step == "model":
+        if text not in MODELS:
+            return await update.message.reply_text("Илтимос, рўйхатдан моделни танланг.")
+        context.user_data["model"] = text
+        context.user_data["step"] = "plate"
+        return await update.message.reply_text("Давлат рақамини киритинг:")
+
+    if step == "plate":
+        context.user_data["plate"] = text.upper()
+        context.user_data["step"] = "mileage"
+        return await update.message.reply_text("Автомобиль пробегини киритинг (км):")
+
+    if step == "mileage":
+        if not text.replace(" ", "").isdigit():
+            return await update.message.reply_text("Пробегни фақат рақам билан киритинг. Масалан: 125000")
+        context.user_data["mileage"] = text
+        context.user_data["step"] = "car_photo"
+        return await update.message.reply_text(
+            "Автомобиль расмини юборинг.\nАгар расм бўлмаса, «Ўтказиб юбориш» ни босинг.",
+            reply_markup=keyboard(["Ўтказиб юбориш"], 1)
+        )
+
+    if step == "car_photo" and text == "Ўтказиб юбориш":
+        context.user_data["car_photo"] = None
+        context.user_data["step"] = "work_photo"
+        return await update.message.reply_text(
+            "Қилинган иш расмини юборинг ёки «Ўтказиб юбориш» ни босинг."
+        )
+
+    if step == "work_photo" and text == "Ўтказиб юбориш":
+        context.user_data["work_photo"] = None
+        context.user_data["step"] = "master"
+        return await update.message.reply_text("Ишни бажарган устанинг исмини киритинг:")
+
+    if step == "master":
+        data = context.user_data
+        conn = db()
+        conn.execute(
+            "INSERT INTO cars (model, plate, mileage, car_photo, work_photo, master, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (data["model"], data["plate"], data["mileage"],
+             data.get("car_photo"), data.get("work_photo"), text,
+             datetime.now().strftime("%Y-%m-%d %H:%M"))
+        )
+        conn.commit()
+        conn.close()
+        summary = (
+            "✅ Маълумот сақланди!\n\n"
+            f"🚘 Модель: {data['model']}\n"
+            f"🔢 Рақам: {data['plate']}\n"
+            f"🛣 Пробег: {data['mileage']} км\n"
+            f"👨‍🔧 Уста: {text}\n"
+            f"📅 Сана: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        context.user_data.clear()
+        return await update.message.reply_text(
+            summary, reply_markup=keyboard(
+                ["➕ Янги автомобиль", "🔎 Рақам бўйича қидириш"], 1
+            )
+        )
+
+    if step == "search":
+        conn = db()
+        rows = conn.execute(
+            "SELECT model, plate, mileage, master, created_at FROM cars "
+            "WHERE UPPER(plate) = UPPER(?) ORDER BY id DESC LIMIT 10",
+            (text,)
+        ).fetchall()
+        conn.close()
+        context.user_data.clear()
+        if not rows:
+            return await update.message.reply_text(
+                "Бу рақам бўйича маълумот топилмади.",
+                reply_markup=keyboard(["➕ Янги автомобиль", "🔎 Рақам бўйича қидириш"], 1)
+            )
+        answer = "🔎 Автомобиль тарихи:\n\n"
+        for r in rows:
+            answer += (
+                f"🚘 {r[0]}\n🔢 {r[1]}\n🛣 {r[2]} км\n"
+                f"👨‍🔧 Уста: {r[3]}\n📅 {r[4]}\n\n"
+            )
+        return await update.message.reply_text(
+            answer, reply_markup=keyboard(["➕ Янги автомобиль", "🔎 Рақам бўйича қидириш"], 1)
+        )
+
+    await update.message.reply_text("Бошлаш учун /start ни босинг.")
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("step")
+    photo_id = update.message.photo[-1].file_id
+
+    if step == "car_photo":
+        context.user_data["car_photo"] = photo_id
+        context.user_data["step"] = "work_photo"
+        await update.message.reply_text(
+            "Автомобиль расми қабул қилинди.\nЭнди қилинган иш расмини юборинг ёки «Ўтказиб юбориш» ни босинг.",
+            reply_markup=keyboard(["Ўтказиб юбориш"], 1)
+        )
+    elif step == "work_photo":
+        context.user_data["work_photo"] = photo_id
+        context.user_data["step"] = "master"
+        await update.message.reply_text("Ишни бажарган устанинг исмини киритинг:",
+                                        reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.message.reply_text("Ҳозир расм керак эмас. /start ни босинг.")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print("Bot error:", context.error)
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN муҳит ўзгарувчиси ўрнатилмаган.")
+    db().close()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(error_handler)
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
